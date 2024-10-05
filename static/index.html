@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html class="dark:bg-gray-900">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Realtime AI Assistant</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body>
+    <script type="importmap">
+    {
+        "imports": {
+            "htm": "https://ga.jspm.io/npm:htm@3.1.1/dist/htm.module.js",
+            "immer": "https://ga.jspm.io/npm:immer@10.1.1/dist/immer.mjs",
+            "react": "https://ga.jspm.io/npm:react@18.3.1/dev.index.js",
+            "react-dom": "https://ga.jspm.io/npm:react-dom@18.3.1/dev.index.js",
+            "react-dom/client": "https://ga.jspm.io/npm:react-dom@18.3.1/dev.client.js",
+            "sdp-transform": "https://ga.jspm.io/npm:sdp-transform@2.14.2/lib/index.js"
+        },
+        "scopes": {
+            "https://ga.jspm.io/": {
+                "scheduler": "https://ga.jspm.io/npm:scheduler@0.23.2/dev.index.js"
+            }
+        }
+    }
+    </script>
+
+    <script async src="https://ga.jspm.io/npm:es-module-shims@1.10.0/dist/es-module-shims.js"
+        crossorigin="anonymous"></script>
+
+    <div id="root"></div>
+
+    <script>window.process = { env: { NODE_ENV: "development" } }</script>
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>
