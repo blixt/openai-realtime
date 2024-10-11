@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -10,24 +11,29 @@ import (
 
 	"github.com/blixt/openai-realtime/openai"
 	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v3/pkg/media"
+	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v4/pkg/media/oggreader"
 )
-
-// Add this utility function at the top of the file, after the imports
 
 func ptr[T any](v T) *T {
 	return &v
 }
 
-// Room represents a chat room
 type Room struct {
-	ID            string
-	Users         map[*User]bool
-	OpenAIConn    *websocket.Conn
-	OpenAIWriteCh chan openai.Event
-	Mu            sync.RWMutex
-	Session       *openai.SessionResource
-	Logger        *log.Logger
+	ID               string
+	users            map[*User]bool
+	openAIConn       *websocket.Conn
+	openAIWriteCh    chan openai.Event
+	mu               sync.RWMutex
+	session          *openai.SessionResource
+	logger           *log.Logger
+	audioTracks      map[*User]*webrtc.TrackLocalStaticRTP
+	sampleAudioTrack *webrtc.TrackLocalStaticSample
+	tracksMu         sync.RWMutex
+	audioQueue       [][]byte
+	audioQueueMu     sync.Mutex
 }
 
 // NewRoom creates a new Room
@@ -37,13 +43,24 @@ func NewRoom(id string) *Room {
 	if err != nil {
 		log.Printf("Failed to create log file for room %s: %v", id, err)
 	}
-
-	return &Room{
+	room := &Room{
 		ID:            id,
-		Users:         make(map[*User]bool),
-		OpenAIWriteCh: make(chan openai.Event, 256),
-		Logger:        log.New(logFile, "", log.LstdFlags),
+		users:         make(map[*User]bool),
+		openAIWriteCh: make(chan openai.Event, 256),
+		logger:        log.New(logFile, "", log.LstdFlags),
+		audioTracks:   make(map[*User]*webrtc.TrackLocalStaticRTP),
 	}
+
+	// Create the sample audio track
+	sampleTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "sampleaudio", "pion")
+	if err != nil {
+		log.Printf("Error creating sample audio track: %v", err)
+	} else {
+		room.sampleAudioTrack = sampleTrack
+	}
+
+	go room.streamSampleAudio()
+	return room
 }
 
 // ConnectToOpenAI connects the room to OpenAI and starts handling messages
@@ -52,10 +69,10 @@ func (room *Room) ConnectToOpenAI() error {
 	if err != nil {
 		return err
 	}
-	room.OpenAIConn = conn
+	room.openAIConn = conn
 
 	// Start handling messages from OpenAI
-	go room.HandleOpenAIMessages()
+	go room.handleOpenAIMessages()
 
 	// Start the OpenAI writer
 	go room.writeLoop()
@@ -63,18 +80,18 @@ func (room *Room) ConnectToOpenAI() error {
 	return nil
 }
 
-// HandleOpenAIMessages handles messages from OpenAI for this room
-func (room *Room) HandleOpenAIMessages() {
+// handleOpenAIMessages handles messages from OpenAI for this room
+func (room *Room) handleOpenAIMessages() {
 	for {
-		_, message, err := room.OpenAIConn.ReadMessage()
+		_, message, err := room.openAIConn.ReadMessage()
 		if err != nil {
 			log.Println("Error reading from OpenAI:", err)
-			room.OpenAIConn.Close()
+			room.openAIConn.Close()
 			break
 		}
 
 		// Log the incoming message
-		room.LogIncomingMessage(message)
+		room.logIncomingMessage(message)
 
 		event, err := openai.ParseEvent(message)
 		if err != nil {
@@ -101,12 +118,12 @@ func (room *Room) HandleOpenAIMessages() {
 					// },
 				},
 			}
-			room.OpenAIWriteCh <- sessionUpdateEvent
+			room.openAIWriteCh <- sessionUpdateEvent
 
 			// Update the room's session
-			room.Mu.Lock()
-			room.Session = &e.Session
-			room.Mu.Unlock()
+			room.mu.Lock()
+			room.session = &e.Session
+			room.mu.Unlock()
 
 			// Broadcast the session update to all users
 			msg := &SessionUpdateMessage{
@@ -143,7 +160,7 @@ func (room *Room) HandleOpenAIMessages() {
 			room.Broadcast(msg)
 
 		case *openai.ResponseAudioDeltaEvent:
-			log.Printf("Audio delta received: ItemID: %s", e.ItemID)
+			log.Printf("Audio delta received: ItemID: %s, Delta length: %d", e.ItemID, len(e.Delta))
 			if e.Delta == "" {
 				continue
 			}
@@ -153,22 +170,16 @@ func (room *Room) HandleOpenAIMessages() {
 				log.Println("Error decoding audio delta:", err)
 				continue
 			}
+			// Add the audio data to the queue
+			room.addAudioChunk(audioData)
 
-			room.Mu.RLock()
-			for user := range room.Users {
-				if user.OutputTrack != nil {
-					err = user.OutputTrack.WriteSample(mediaSample(audioData))
-					if err != nil {
-						log.Println("Error sending audio to client:", err)
-						continue
-					}
-				}
-			}
-			room.Mu.RUnlock()
+			// TODO: Implement a separate goroutine to process the audio queue
+			// TODO: Convert the audio data to the appropriate format for WebRTC
+			// TODO: Split the audio data into smaller chunks suitable for RTP packets
+			// TODO: Send the audio data over time to match real-time playback
 
 		case *openai.ResponseAudioDoneEvent:
 			log.Printf("Audio done: ItemID: %s", e.ItemID)
-			// Consider sending a message to the UI indicating that audio playback is complete
 
 		case *openai.ResponseFunctionCallArgumentsDoneEvent:
 			log.Printf("Function execution requested: %s", e.CallID)
@@ -191,9 +202,9 @@ func (room *Room) HandleOpenAIMessages() {
 		case *openai.SessionUpdatedEvent:
 			session := e.Session
 
-			room.Mu.Lock()
-			room.Session = &session
-			room.Mu.Unlock()
+			room.mu.Lock()
+			room.session = &session
+			room.mu.Unlock()
 
 			msg := &SessionUpdateMessage{
 				Session: &session,
@@ -297,32 +308,62 @@ func (room *Room) HandleOpenAIMessages() {
 
 // AddUser adds a user to the room
 func (room *Room) AddUser(user *User) {
-	room.Mu.Lock()
-	defer room.Mu.Unlock()
-	room.Users[user] = true
-	user.OpenAIWriteCh = room.OpenAIWriteCh
-	if room.Session != nil {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	room.users[user] = true
+	user.Room = room
+	if room.session != nil {
 		user.WriteChan <- &SessionUpdateMessage{
-			Session: room.Session,
+			Session: room.session,
 		}
 	}
 }
 
 // RemoveUser removes a user from the room
 func (room *Room) RemoveUser(user *User) {
-	room.Mu.Lock()
-	defer room.Mu.Unlock()
-	delete(room.Users, user)
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	delete(room.users, user)
+
+	room.tracksMu.Lock()
+	userTrack := room.audioTracks[user]
+	delete(room.audioTracks, user)
+	room.tracksMu.Unlock()
+
+	// Remove the user's track from all other users
+	for otherUser := range room.users {
+		if otherUser == user {
+			continue
+		}
+		if err := otherUser.RemoveTrack(userTrack); err != nil {
+			log.Printf("Error removing track from user %p: %v", otherUser, err)
+		}
+	}
+
+	// Remove all other users' tracks from the leaving user
+	room.tracksMu.RLock()
+	for _, track := range room.audioTracks {
+		if err := user.RemoveTrack(track); err != nil {
+			log.Printf("Error removing track from leaving user %p: %v", user, err)
+		}
+	}
+	room.tracksMu.RUnlock()
+
+	if user.PeerConnection != nil {
+		if err := user.PeerConnection.Close(); err != nil {
+			log.Printf("Error closing PeerConnection for user %p: %v", user, err)
+		}
+	}
 }
 
 // Broadcast sends a message to all users in the room
 func (room *Room) Broadcast(msg Message) {
-	room.Mu.RLock()
-	defer room.Mu.RUnlock()
+	room.mu.RLock()
+	defer room.mu.RUnlock()
 	// FIXME: The message is a pointer which will be shared across the different
 	// users and the setType method modifies the message which causes a data
 	// race.
-	for user := range room.Users {
+	for user := range room.users {
 		select {
 		case user.WriteChan <- msg:
 		default:
@@ -333,38 +374,35 @@ func (room *Room) Broadcast(msg Message) {
 
 // Close closes the room and all associated resources
 func (room *Room) Close() {
-	room.Mu.Lock()
-	defer room.Mu.Unlock()
-	if room.OpenAIConn != nil {
-		room.OpenAIConn.Close()
+	room.mu.Lock()
+	defer room.mu.Unlock()
+	if room.openAIConn != nil {
+		room.openAIConn.Close()
 	}
-	for user := range room.Users {
+	for user := range room.users {
 		user.Close()
 	}
 }
 
 // HandleUserMessage processes incoming messages from users
-func (room *Room) HandleUserMessage(user *User, message []byte) {
+func (room *Room) HandleUserMessage(user *User, message []byte) error {
 	// Parse the incoming message
 	msg, err := ParseMessage(message)
 	if err != nil {
-		log.Printf("Error parsing %q: %s", message, err)
-		return
+		return fmt.Errorf("error parsing message: %w", err)
 	}
 
 	switch m := msg.(type) {
 	case *WebRTCOfferMessage:
-		err = user.SetupWebRTC(m.SDP)
-		if err != nil {
-			log.Println("Error setting up WebRTC:", err)
-			return
+		if err := user.SetupWebRTC(m.SDP); err != nil {
+			return fmt.Errorf("error setting up WebRTC: %w", err)
 		}
 
 	case *WebRTCCandidateMessage:
 		err = user.HandleICECandidate(m.Candidate, m.SDPMid, m.SDPMLineIndex, m.UsernameFragment)
 		if err != nil {
 			log.Println("Error handling ICE candidate:", err)
-			return
+			return err
 		}
 
 	case *MessageUpdate:
@@ -378,7 +416,7 @@ func (room *Room) HandleUserMessage(user *User, message []byte) {
 				Status:  "completed",
 			},
 		}
-		user.OpenAIWriteCh <- event
+		user.Room.openAIWriteCh <- event
 		room.Broadcast(&MessageUpdate{
 			MessageID: m.MessageID,
 			Content:   m.Content,
@@ -387,36 +425,36 @@ func (room *Room) HandleUserMessage(user *User, message []byte) {
 		})
 
 	case *FunctionAddMessage:
-		room.Mu.Lock()
-		if room.Session == nil {
-			room.Mu.Unlock()
+		room.mu.Lock()
+		if room.session == nil {
+			room.mu.Unlock()
 			log.Println("Session not initialized")
-			return
+			return fmt.Errorf("session not initialized")
 		}
 
 		// Add the new tool directly from the message
-		room.Session.Tools = append(room.Session.Tools, m.Schema)
+		room.session.Tools = append(room.session.Tools, m.Schema)
 
 		// Send the updated session to OpenAI
 		updateEvent := &openai.SessionUpdateEvent{
 			Session: openai.SessionConfig{
-				Tools: room.Session.Tools,
+				Tools: room.session.Tools,
 			},
 		}
-		user.OpenAIWriteCh <- updateEvent
-		room.Mu.Unlock()
+		user.Room.openAIWriteCh <- updateEvent
+		room.mu.Unlock()
 
 	case *FunctionRemoveMessage:
-		room.Mu.Lock()
-		if room.Session == nil {
-			room.Mu.Unlock()
+		room.mu.Lock()
+		if room.session == nil {
+			room.mu.Unlock()
 			log.Println("Session not initialized")
-			return
+			return fmt.Errorf("session not initialized")
 		}
 
-		for i, tool := range room.Session.Tools {
+		for i, tool := range room.session.Tools {
 			if tool.Name == m.Name {
-				room.Session.Tools = append(room.Session.Tools[:i], room.Session.Tools[i+1:]...)
+				room.session.Tools = append(room.session.Tools[:i], room.session.Tools[i+1:]...)
 				break
 			}
 		}
@@ -424,11 +462,11 @@ func (room *Room) HandleUserMessage(user *User, message []byte) {
 		// Send the updated session to OpenAI
 		updateEvent := &openai.SessionUpdateEvent{
 			Session: openai.SessionConfig{
-				Tools: room.Session.Tools,
+				Tools: room.session.Tools,
 			},
 		}
-		user.OpenAIWriteCh <- updateEvent
-		room.Mu.Unlock()
+		user.Room.openAIWriteCh <- updateEvent
+		room.mu.Unlock()
 
 	case *FunctionResultMessage:
 		// Forward function result from the user to OpenAI
@@ -441,40 +479,162 @@ func (room *Room) HandleUserMessage(user *User, message []byte) {
 				},
 			},
 		}
-		user.OpenAIWriteCh <- event
+		user.Room.openAIWriteCh <- event
 
 	default:
-		log.Printf("Unknown message type: %T", m)
+		return fmt.Errorf("unknown message type: %T", m)
 	}
+
+	return nil
 }
 
 // writeLoop handles writing messages to the WebSocket
 func (room *Room) writeLoop() {
-	for event := range room.OpenAIWriteCh {
+	for event := range room.openAIWriteCh {
 		eventJSON, err := openai.MarshalJSON(event)
 		if err != nil {
 			log.Println("Error marshalling event:", err)
 			continue
 		}
 		// Log the outgoing message
-		room.Logger.Printf("> %s", string(eventJSON))
-		err = room.OpenAIConn.WriteMessage(websocket.TextMessage, eventJSON)
+		room.logger.Printf("> %s", string(eventJSON))
+		err = room.openAIConn.WriteMessage(websocket.TextMessage, eventJSON)
 		if err != nil {
 			log.Println("Error writing to OpenAI:", err)
 		}
 	}
 }
 
-// LogIncomingMessage logs incoming messages from OpenAI
-func (room *Room) LogIncomingMessage(data []byte) {
-	room.Logger.Printf("< %s", string(data))
+// logIncomingMessage logs incoming messages from OpenAI
+func (room *Room) logIncomingMessage(data []byte) {
+	room.logger.Printf("< %s", string(data))
 }
 
-// Create a media sample from audio data
-// Note: The 'data' parameter must be G.711 μ-law (PCMU) encoded audio at 8kHz
-func mediaSample(data []byte) media.Sample {
-	return media.Sample{
-		Data:     data,
-		Duration: time.Millisecond * 20, // 20ms packets
+// broadcastAudio sends audio data to all users in the room except the sender
+func (room *Room) broadcastAudio(sender *User, packet *rtp.Packet) {
+	room.tracksMu.RLock()
+	defer room.tracksMu.RUnlock()
+
+	for user, track := range room.audioTracks {
+		if user == sender {
+			continue
+		}
+		err := track.WriteRTP(packet)
+		if err != nil {
+			log.Printf("Error broadcasting audio to user %p: %v", user, err)
+		}
 	}
+}
+
+// streamSampleAudio streams sample audio to all users in the room
+func (room *Room) streamSampleAudio() {
+	if room.sampleAudioTrack == nil {
+		log.Println("Sample audio track not initialized")
+		return
+	}
+
+	audioFileName := "audio.ogg"
+	file, err := os.Open(audioFileName)
+	if err != nil {
+		log.Printf("Error opening audio file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	ogg, _, err := oggreader.NewWith(file)
+	if err != nil {
+		log.Printf("Error creating OGG reader: %v", err)
+		return
+	}
+
+	var lastGranule uint64
+	oggPageDuration := time.Millisecond * 20
+	ticker := time.NewTicker(oggPageDuration)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		pageData, pageHeader, err := ogg.ParseNextPage()
+		if err != nil {
+			if err == io.EOF {
+				// Restart the audio file
+				file.Seek(0, 0)
+				ogg, _, _ = oggreader.NewWith(file)
+				continue
+			}
+			log.Printf("Error parsing OGG page: %v", err)
+			return
+		}
+
+		sampleCount := float64(pageHeader.GranulePosition - lastGranule)
+		lastGranule = pageHeader.GranulePosition
+		sampleDuration := time.Duration((sampleCount/48000)*1000) * time.Millisecond
+
+		if err := room.sampleAudioTrack.WriteSample(media.Sample{Data: pageData, Duration: sampleDuration}); err != nil {
+			log.Printf("Error writing audio sample: %v", err)
+			return
+		}
+	}
+}
+
+// addAudioChunk adds an audio chunk to the queue
+func (room *Room) addAudioChunk(data []byte) {
+	room.audioQueueMu.Lock()
+	defer room.audioQueueMu.Unlock()
+	room.audioQueue = append(room.audioQueue, data)
+}
+
+// TODO: Implement a method to process the audio queue
+// This method should run in a separate goroutine
+// It should:
+// 1. Take audio chunks from the queue
+// 2. Convert them to the appropriate format for WebRTC (if necessary)
+// 3. Split them into smaller chunks suitable for RTP packets
+// 4. Send them over time to match real-time playback
+
+// setupUserWebRTC sets up WebRTC for a user
+func (room *Room) setupUserWebRTC(user *User) error {
+	if user.PeerConnection == nil {
+		return fmt.Errorf("user PeerConnection is nil")
+	}
+
+	audioTrack, err := webrtc.NewTrackLocalStaticRTP(
+		webrtc.RTPCodecCapability{
+			MimeType:  webrtc.MimeTypePCMU,
+			ClockRate: 8000,
+			Channels:  1,
+		},
+		"audio",
+		"pion",
+	)
+	if err != nil {
+		return fmt.Errorf("error creating audio track: %w", err)
+	}
+
+	room.tracksMu.Lock()
+	room.audioTracks[user] = audioTrack
+	room.tracksMu.Unlock()
+
+	// Add the new user's track to all existing users
+	room.mu.RLock()
+	for existingUser := range room.users {
+		if existingUser != user && existingUser.PeerConnection != nil {
+			if _, err := existingUser.PeerConnection.AddTrack(audioTrack); err != nil {
+				log.Printf("Error adding track to existing user %p: %v", existingUser, err)
+			}
+		}
+	}
+	room.mu.RUnlock()
+
+	// Add all existing users' tracks to the new user
+	room.tracksMu.RLock()
+	for existingUser, existingTrack := range room.audioTracks {
+		if existingUser != user {
+			if _, err := user.PeerConnection.AddTrack(existingTrack); err != nil {
+				log.Printf("Error adding existing track to new user %p: %v", user, err)
+			}
+		}
+	}
+	room.tracksMu.RUnlock()
+
+	return nil
 }

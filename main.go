@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -38,8 +39,60 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	fmt.Println("Server listening on http://localhost:" + port)
+
+	// Get all available IP addresses
+	addrs := getAvailableAddresses(port)
+
+	// Print server information
+	fmt.Println("Server is accessible at the following addresses:")
+	for _, addr := range addrs {
+		fmt.Printf("  http://%s\n", addr)
+	}
+
+	// Listen on all interfaces
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+// getAvailableAddresses returns a list of IP addresses the server is accessible on
+func getAvailableAddresses(port string) []string {
+	var addresses []string
+
+	// Get all network interfaces
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		log.Println("Error getting network interfaces:", err)
+		return addresses
+	}
+
+	for _, iface := range ifaces {
+		// Skip loopback and down interfaces
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			switch v := addr.(type) {
+			case *net.IPNet:
+				// Skip loopback and link-local addresses
+				if v.IP.IsLoopback() || v.IP.IsLinkLocalUnicast() {
+					continue
+				}
+				if v.IP.To4() != nil {
+					addresses = append(addresses, fmt.Sprintf("%s:%s", v.IP.String(), port))
+				}
+			}
+		}
+	}
+
+	// Always include localhost
+	addresses = append(addresses, fmt.Sprintf("localhost:%s", port))
+
+	return addresses
 }
 
 // Handle WebSocket connections
@@ -91,6 +144,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Process the incoming message
-		room.HandleUserMessage(user, message)
+		if err := room.HandleUserMessage(user, message); err != nil {
+			log.Printf("Error handling user message: %v", err)
+			user.WriteChan <- &chat.ErrorMessage{
+				Error: "Failed to process message.",
+			}
+			continue
+		}
 	}
 }

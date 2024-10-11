@@ -9,92 +9,92 @@ import { initialState, reducer } from "./reducer.js";
 const html = htm.bind(React.createElement);
 
 function App() {
-	const [state, dispatch] = useReducer(reducer, initialState);
-	const { messages, error, usage, session, connectionStatus } = state;
+    const [state, dispatch] = useReducer(reducer, initialState);
+    const { messages, error, usage, session, connectionStatus } = state;
 
-	/** @type {React.RefObject<RealtimeManager | null>} */
-	const realtimeManagerRef = useRef(null);
+    /** @type {React.RefObject<RealtimeManager | null>} */
+    const realtimeManagerRef = useRef(null);
 
-	useEffect(() => {
-		realtimeManagerRef.current = new RealtimeManager(`ws://${window.location.host}/ws`, dispatch);
+    useEffect(() => {
+        realtimeManagerRef.current = new RealtimeManager(`ws://${window.location.host}/ws`, dispatch);
 
-		return () => {
-			if (realtimeManagerRef.current) {
-				realtimeManagerRef.current.close();
-				realtimeManagerRef.current = null;
-			}
-		};
-	}, []);
+        return () => {
+            if (realtimeManagerRef.current) {
+                realtimeManagerRef.current.close();
+                realtimeManagerRef.current = null;
+            }
+        };
+    }, []);
 
-	// Register functions once when session is available.
-	const hasSession = !!session;
-	useEffect(() => {
-		if (!hasSession) return;
-		const manager = realtimeManagerRef.current;
-		if (!manager) return;
+    // Register functions once when session is available.
+    const hasSession = !!session;
+    useEffect(() => {
+        if (!hasSession) return;
+        const manager = realtimeManagerRef.current;
+        if (!manager) return;
 
-		manager.registerFunction({
-			name: "change_background_color",
-			description: "Change the background color of the page",
-			parameters: {
-				color: {
-					type: "string",
-					description: "The CSS color to change the background to",
-					required: true,
-				},
-			},
-			handler: (args) => {
-				document.body.style.backgroundColor = args.color;
-				console.log(`Background color changed to ${args.color}`);
-			},
-		});
-	}, [hasSession]);
+        manager.registerFunction({
+            name: "change_background_color",
+            description: "Change the background color of the page",
+            parameters: {
+                color: {
+                    type: "string",
+                    description: "The CSS color to change the background to",
+                    required: true,
+                },
+            },
+            handler: (args) => {
+                document.body.style.backgroundColor = args.color;
+                console.log(`Background color changed to ${args.color}`);
+            },
+        });
+    }, [hasSession]);
 
-	const start = useCallback(async () => {
-		try {
-			await realtimeManagerRef.current.connect();
-		} catch (error) {
-			console.error("Failed to connect:", error);
-		}
-	}, []);
+    const start = useCallback(async () => {
+        try {
+            await realtimeManagerRef.current.connect();
+        } catch (error) {
+            console.error("Failed to connect:", error);
+        }
+    }, []);
 
-	const stop = useCallback(() => {
-		realtimeManagerRef.current?.close();
-		realtimeManagerRef.current = null;
-	}, []);
+    const stop = useCallback(() => {
+        realtimeManagerRef.current?.close();
+        realtimeManagerRef.current = null;
+    }, []);
 
-	const sendTextMessage = useCallback((text) => {
-		if (!realtimeManagerRef.current) {
-			throw new Error("RealtimeManager is not initialized");
-		}
-		const messageId = Date.now().toString();
-		realtimeManagerRef.current.send({
-			type: MESSAGE_TYPES.MESSAGE_UPDATE,
-			message_id: messageId,
-			content: text,
-		});
-		dispatch({
-			type: "UPDATE_MESSAGE",
-			id: messageId,
-			content: text,
-			sender: "user",
-			audio: false,
-		});
-	}, []);
+    const sendTextMessage = useCallback((text) => {
+        if (!realtimeManagerRef.current) {
+            throw new Error("RealtimeManager is not initialized");
+        }
+        const messageId = Date.now().toString();
+        realtimeManagerRef.current.send({
+            type: MESSAGE_TYPES.MESSAGE_UPDATE,
+            message_id: messageId,
+            content: text,
+        });
+        dispatch({
+            type: "UPDATE_MESSAGE",
+            id: messageId,
+            content: text,
+            sender: "user",
+            audio: false,
+        });
+    }, []);
 
-	const handleSubmit = useCallback(
-		(e) => {
-			e.preventDefault();
-			const text = e.target.elements.textInput.value.trim();
-			if (text !== "") {
-				sendTextMessage(text);
-				e.target.elements.textInput.value = "";
-			}
-		},
-		[sendTextMessage],
-	);
+    const handleSubmit = useCallback(
+        (e) => {
+            e.preventDefault();
+            const text = e.target.elements.textInput.value.trim();
+            if (text !== "") {
+                sendTextMessage(text);
+                e.target.elements.textInput.value = "";
+            }
+        },
+        [sendTextMessage],
+    );
 
-	return html`
+    return html`
 		<div className="container mx-auto p-4 max-w-2xl">
 			<h1 className="text-2xl font-bold mb-4 text-gray-900 dark:text-gray-100">Realtime AI Assistant</h1>
 			<div className="mb-4 space-x-2">
@@ -115,18 +115,18 @@ function App() {
 			</div>
 
 			${
-				connectionStatus === "connecting" &&
-				html`
+                connectionStatus === "connecting" &&
+                html`
 				<div className="mb-4 text-gray-600 dark:text-gray-400">
 					<p>Establishing connection... Please wait.</p>
 					<div className="mt-2 w-8 h-8 border-t-2 border-b-2 border-gray-900 dark:border-gray-100 rounded-full animate-spin"></div>
 				</div>
 			`
-			}
+            }
 
 			${
-				session &&
-				html`
+                session &&
+                html`
 				<div className="mb-2 text-sm text-gray-600 dark:text-gray-400">
 					<p>Model: ${session.model}</p>
 					<p>Voice: ${session.voice}</p>
@@ -134,7 +134,7 @@ function App() {
 					<p>Output format: ${session.output_audio_format}</p>
 				</div>
 			`
-			}
+            }
 
 			<div className="mb-2 text-sm text-gray-600 dark:text-gray-400">
 				<p>Total Tokens: ${usage.total_tokens}</p>
@@ -144,21 +144,21 @@ function App() {
 
 			<div className="border border-gray-300 dark:border-gray-600 rounded p-4 mb-4 h-80 overflow-y-auto bg-white dark:bg-gray-800">
 				${messages.map(
-					(message) => html`
+                    (message) => html`
 						<div key=${message.id} className=${`mb-2 ${message.sender === "user" ? "text-right" : "text-left"}`}>
 							<p className=${`inline-block p-2 rounded-lg ${
-								message.sender === "user"
-									? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100"
-									: message.audio
-										? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100"
-										: "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
-							}`}>
+                                message.sender === "user"
+                                    ? "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-100"
+                                    : message.audio
+                                      ? "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-100"
+                                      : "bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200"
+                            }`}>
 								${message.audio ? "🎤 " : ""}${message.content}
 								${message.isDone === false ? html`<span className="ml-2 animate-pulse">...</span>` : ""}
 							</p>
 						</div>
 					`,
-				)}
+                )}
 			</div>
 
 			${error && html`<div className="text-red-500 mb-4">${error}</div>`}

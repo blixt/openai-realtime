@@ -1,11 +1,11 @@
 package chat
 
 import (
+	"fmt"
 	"log"
 
-	"github.com/blixt/openai-realtime/openai"
 	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v4"
 )
 
 // User represents a connected user
@@ -13,8 +13,8 @@ type User struct {
 	WS             *websocket.Conn
 	WriteChan      chan Message
 	PeerConnection *webrtc.PeerConnection
-	OutputTrack    *webrtc.TrackLocalStaticSample
-	OpenAIWriteCh  chan<- openai.Event
+	OutputTrack    *webrtc.TrackLocalStaticRTP
+	Room           *Room
 	done           chan struct{}
 }
 
@@ -58,4 +58,25 @@ func (u *User) writeLoop() {
 func (u *User) Close() {
 	close(u.done)
 	close(u.WriteChan)
+	if u.PeerConnection != nil {
+		u.PeerConnection.Close()
+	}
+}
+
+// RemoveTrack removes a track from the user's peer connection
+func (user *User) RemoveTrack(track *webrtc.TrackLocalStaticRTP) error {
+	if user.PeerConnection == nil {
+		return nil // Nothing to do if there's no PeerConnection
+	}
+	var sender *webrtc.RTPSender
+	for _, s := range user.PeerConnection.GetSenders() {
+		if s.Track() == track {
+			sender = s
+			break
+		}
+	}
+	if sender == nil {
+		return fmt.Errorf("track not found")
+	}
+	return user.PeerConnection.RemoveTrack(sender)
 }
