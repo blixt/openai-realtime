@@ -1,6 +1,11 @@
 {
-	"$schema": "https://biomejs.dev/schemas/1.9.3/schema.json",
-	"formatter": {
-		"lineWidth": 150
-	}
+    "$schema": "https://biomejs.dev/schemas/1.9.3/schema.json",
+    "formatter": {
+        "useEditorconfig": true
+    },
+    "vcs": {
+        "enabled": true,
+        "clientKind": "git",
+        "useIgnoreFile": true
+    }
 }
